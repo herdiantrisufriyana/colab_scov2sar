@@ -53,7 +53,8 @@ approximately requires ~5 minutes.
 
 ## Demo
 
-All codes require ~5 minutes to complete.
+All codes require ~5 minutes to complete. However, datasets should be requested 
+to the corresponding author. Put data into a 'data' folder.
 
 
 ## Instructions for use
