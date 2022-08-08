@@ -1,0 +1,1592 @@
+---
+title: "SARS-CoV2 Data Analysis of Sarjito Hospital"
+output: pdf_document
+---
+
+```{r Set up reproducible environment, include=FALSE}
+if(!require(renv)) install.packages('renv')
+if(!file.exists('renv')) renv::init(restart=F)
+```
+
+```{r Install and set specific version of Bioconductor, include=FALSE}
+# Install devtools to install specific version of BiocManager.
+if(!require(devtools)) install.packages('devtools')
+
+# Install specific version of BiocManager and Bioconductor.
+devtools::install_version('BiocManager',version='1.30.10',upgrade=F)
+install_steps=T
+if(BiocManager::version()!='3.11'){
+  BiocManager::install(version='3.11',update=T,ask=F)
+  install_steps=c(F,T)
+}
+```
+
+```{r Install and load packages with specific version, include=FALSE}
+for(i in install_steps){
+  if(i) renv::restore()
+  
+  packages=
+    list(
+      bioc_load=
+        c('tidyverse'
+          ,'dslabs'
+          ,'lubridate'
+          ,'mice'
+          ,'pbapply')
+    )
+  
+  if(i){
+    x=unlist(packages[c(
+        'bioc_load'
+      )])
+    sapply(
+      x[x!='reticulate']
+      ,library
+      ,character.only=T
+    )
+    rm(x)
+    options(dplyr.summarise.inform=F)
+    dslabs::ds_theme_set()
+  }else{
+    BiocManager::install(
+       packages[['bioc_load']]
+       ,version='3.11'
+       ,update=F
+      )
+    renv::snapshot()
+  }
+}
+
+rm(i)
+```
+
+```{r Check attributes of data sources, eval=FALSE, include=FALSE}
+read_csv('data/form_penelitian_covid19_202105271630_gmt8.csv') %>%
+  colnames() %>%
+  data.frame(ref_center=.) %>%
+  add_row(data.frame(ref_center=c('(empty1)','(empty2)'))) %>%
+  cbind(
+    read_csv(
+        'data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd.csv'
+      ) %>%
+      colnames() %>%
+      data.frame(em_dept=.)
+  ) %>%
+  mutate(equal=ref_center==em_dept) %>%
+  cbind(
+    read_csv(
+        paste0(
+          'data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd.csv'
+          ,'_to_202108211323_pcr.csv'
+        )
+      ) %>%
+      colnames() %>%
+      data.frame(em_dept2=.)
+  ) %>%
+  mutate(equal2=em_dept==em_dept2)
+```
+
+```{r Load raw data, include=FALSE}
+raw_data=list()
+
+raw_data$source=
+  read_csv('data/form_penelitian_covid19_202105271630_gmt8.csv') %>%
+  mutate(Ket=NA) %>%
+  mutate(Tempat='Poliklinik') %>%
+  rbind(
+    read_csv(
+        'data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd.csv'
+      ) %>%
+      .[,-ncol(.)] %>%
+      mutate(Tempat='IGD') %>%
+      `colnames<-`(
+        c(colnames(
+            read_csv('data/form_penelitian_covid19_202105271630_gmt8.csv')
+          )
+          ,'Ket','Tempat')
+    )
+  )
+```
+
+```{r Translate attributes to English, include=FALSE}
+raw_data$meta$attribute=
+  raw_data$source %>%
+  colnames() %>%
+  data.frame(description=.) %>%
+  mutate(
+    attribute=
+      case_when(
+        description=='No'~'index'
+        ,description=='No RM'~'mrn'
+        ,description=='Tgl periksa pertama'~'admission_date'
+        
+        ,description=='Jenis kelamin'~'sex'
+        ,description=='Umur'~'age'
+        ,description=='Demam'~'fever'
+        ,description=='Batuk'~'cough'
+        ,description=='Anosmia'~'loss_smell'
+        ,description=='Ageusia'~'loss_taste'
+        ,description=='Fatigue/lelah/lemas'~'fatigue'
+        ,description=='Penurunan nafsu makan'~'skipped_meals'
+        ,description=='Pilek'~'nasal_discharge'
+        ,description=='Nyeri tenggorokan'~'sore_throat'
+        ,description=='Myalgia'~'sore_muscles'
+        ,description=='Nyeri kepala'~'headache'
+        ,description=='Pusing berputar/nggliyer'~'dizziness'
+        ,description=='Tanda/gejala lain (sebutkan)'~'others'
+        ,description=='Riwayat kontak'~'contact_history'
+        ,description=='Riwayat keluar kota/luar negeri'~'travel_history'
+        
+        ,description=='Hasil CT scan thorax (jika ada)'~'ct_scan_chest_desc'
+        ,description=='Tgl periksa CT scan thorax (jika di-CT scan)'
+         ~'ct_scan_chest_date'
+        ,description=='Hasil Foto Thorax PA'~'plain_xray_chest_desc'
+        ,description=='Tgl periksa foto thorax PA'~'plain_xray_chest_date'
+        ,description=='Hasil swab PCR'~'covid19_pcr_result'
+        ,description=='Tgl dilakukan PCR'~'covid19_pcr_date'
+        ,description=='Hasil swab/rapid antigen (jika dilakukan)'
+         ~'covid19_ag_result'
+        ,description=='Tgl dilakukan swab/rapid antigen (jika ada)'
+         ~'covid19_ag_date'
+        ,description=='Hasil rapid antibody'~'covid19_ab_result'
+        ,description=='Tgl rapid antibody'~'covid19_ab_date'
+        
+        ,description=='Komorbid'~'comorbidity'
+        
+        ,description=='Hasil MRI Thorax'~'mri_chest_desc'
+        ,description=='Tgl dilakukan MRI Thorax'~'mri_chest_date'
+        
+        ,description=='Vaksinasi'~'vaccination'
+        ,description=='Ket'~'note'
+        ,description=='Tempat'~'setting'
+      )
+  ) %>%
+  select(attribute,everything())
+```
+
+```{r Function to insert specific changes by hand}
+genspo_cleaning=function(data,attribute){
+  data %>%
+    setNames(attribute) %>%
+    fill(index,.direction='down') %>%
+    filter(!(
+      ((index==555 & setting=='Poliklinik')
+       |
+       (index==199 & setting=='IGD'))
+      & is.na(mrn)
+    )) %>%
+    mutate(
+      mrn=
+        ifelse(
+          index==368  & setting=='Poliklinik'
+          ,NA
+          ,mrn
+        )
+    ) %>%
+    mutate(
+      index=
+        ifelse(
+          index==368  & setting=='Poliklinik'
+          ,367
+          ,index
+        )
+    ) %>%
+    mutate(
+      mrn=
+        ifelse(
+          index==363 & mrn=='-' & setting=='Poliklinik'
+          ,NA
+          ,mrn
+        )
+    ) %>%
+    mutate(
+      mrn=
+        ifelse(
+          index==398 & mrn=='-' & setting=='Poliklinik'
+          ,NA
+          ,mrn
+        )
+    ) %>%
+    mutate(
+      index=
+        ifelse(
+          index==183 & admission_date=='21/03/2021' & setting=='Poliklinik'
+          ,max(index,na.rm=T)+1
+          ,index
+        )
+    ) %>%
+    mutate(
+      index=
+        ifelse(
+          index==3 & admission_date=='09/07/2021' & setting=='IGD'
+          ,2
+          ,index
+        )
+    ) %>%
+    mutate_all(as.character) %>%
+    group_by(setting,index) %>%
+    summarize_all(function(x){
+      y=x %>%
+        .[!is.na(.)] %>%
+        paste(collapse=' | ')
+      
+      y=ifelse(y=='',NA,y)
+      y=ifelse(is.na(y),'No data',y)
+      y
+    }) %>%
+    ungroup() %>%
+    mutate(
+      plain_xray_chest_desc=
+        ifelse(
+          index==88 & setting=='Poliklinik'
+          ,str_replace_all(
+            plain_xray_chest_desc
+            ,' \\| di RS Condong Catur'
+            ,' (di RS Condong Catur)'
+          )
+          ,plain_xray_chest_desc
+        )
+    ) %>%
+    mutate(
+      covid19_pcr_result=
+        ifelse(
+          index==77 & setting=='Poliklinik'
+          ,str_replace_all(
+            covid19_pcr_result
+            ,' \\| Rujukan dari rs adinda dg swab pcr +'
+            ,' (Rujukan dari rs adinda dg swab pcr +)'
+          )
+          ,covid19_pcr_result
+        )
+    ) %>%
+    mutate(
+      covid19_ag_result=
+        ifelse(
+          index==77 & setting=='Poliklinik'
+          ,str_replace_all(
+            covid19_ag_result
+            ,' \\| di pkm jetis di rm hanya tulisan swab, tidak tau pcr atau bukan'
+            ,' (di pkm jetis di rm hanya tulisan swab, tidak tau pcr atau bukan)'
+          )
+          ,covid19_ag_result
+        )
+    ) %>%
+    mutate_at(
+      c('mri_chest_desc','mri_chest_date')
+      ,function(x){
+        ifelse(x=='No data | No data','No data',x)
+      }
+    ) %>%
+    mutate(
+      covid19_pcr_result=
+        ifelse(
+          index==250 & setting=='Poliklinik'
+          ,paste0(covid19_pcr_result,' (',covid19_pcr_date,')')
+          ,covid19_pcr_result
+        )
+    ) %>%
+    mutate(
+      covid19_pcr_date=
+        ifelse(
+          index==250 & setting=='Poliklinik'
+          ,'No data'
+          ,covid19_pcr_date
+        )
+    ) %>%
+    mutate(
+      plain_xray_chest_date=
+        ifelse(
+          index==531 & setting=='Poliklinik'
+          ,'10/4/2021'
+          ,plain_xray_chest_date
+        )
+    ) %>%
+    mutate(
+      admission_date=
+        ifelse(
+          index==168 & admission_date=='28/03/7518' & setting=='Poliklinik'
+          ,'28/03/2020'
+          ,admission_date
+        )
+    ) %>%
+    mutate(
+      covid19_pcr_date=
+        ifelse(
+          index==304 & covid19_pcr_date=='29/05/2929' & setting=='Poliklinik'
+          ,'29/05/2020'
+          ,covid19_pcr_date
+        )
+    ) %>%
+    mutate(
+      covid19_pcr_date=
+        ifelse(
+          index==432 & covid19_pcr_date=='22/12/29' & setting=='Poliklinik'
+          ,'22/12/2020'
+          ,covid19_pcr_date
+        )
+    ) %>%
+    mutate(
+      covid19_ag_date=
+        ifelse(
+          index==35 & covid19_ag_date=='29/2/2021' & setting=='Poliklinik'
+          ,'29/1/2021'
+          ,covid19_ag_date
+        )
+    ) %>%
+    mutate(
+      plain_xray_chest_date=
+        ifelse(
+          index==147
+          & plain_xray_chest_date=='03/12/20 | 16/20/20'
+          & setting=='Poliklinik'
+          ,'03/12/20 | 16/12/20'
+          ,plain_xray_chest_date
+        )
+    ) %>%
+    mutate(
+      admission_date=
+        ifelse(
+          index==118 & admission_date=='25/01/12' & setting=='Poliklinik'
+          ,'25/01/2021'
+          ,admission_date
+        )
+    ) %>%
+    mutate(
+      admission_date=
+        ifelse(
+          index%in%c(120:198,23,92) & setting=='IGD'
+          ,str_replace_all(admission_date,'-','/')
+          ,admission_date
+        )
+    ) %>%
+    mutate(
+      plain_xray_chest_date=
+        ifelse(
+          index==135 & setting=='IGD'
+          ,str_replace_all(plain_xray_chest_date,'-','/')
+          ,plain_xray_chest_date
+        )
+    ) %>%
+    mutate(
+      covid19_pcr_date=
+        ifelse(
+          index%in%c(44,47) & setting=='IGD'
+          ,str_replace_all(covid19_pcr_date,'-','/')
+          ,covid19_pcr_date
+        )
+    ) %>%
+    mutate(
+      covid19_ab_date=
+        ifelse(
+          index%in%c(32,39,53,54,55,56,137) & setting=='IGD'
+          ,str_replace_all(covid19_ab_date,'-','/')
+          ,covid19_ab_date
+        )
+    ) %>%
+    mutate(
+      mri_chest_date=
+        ifelse(
+          index==142 & setting=='IGD'
+          ,str_remove_all(mri_chest_date,'\\(di RS bethesda\\)')
+          ,mri_chest_date
+        )
+      ,mri_chest_desc=
+        ifelse(
+          index==142 & setting=='IGD'
+          ,paste0(mri_chest_desc,' (di RS bethesda)')
+          ,mri_chest_desc
+        )
+    ) %>%
+    mutate(
+      covid19_ab_date=
+        ifelse(
+          index%in%c(8,10,11,13,20,45,58,98) & setting=='IGD'
+          ,sapply(covid19_ab_date,function(x){
+            y=str_split(x,'\\/')[[1]]
+            paste0(y[2],'/',y[1],'/',y[3])
+          })
+          ,covid19_ab_date
+        )
+    ) %>%
+    mutate(
+      admission_date=
+        ifelse(
+          index==23 & admission_date=='30/02/21' & setting=='IGD'
+          ,'30/03/2021'
+          ,admission_date
+        )
+    ) %>%
+    mutate(
+      covid19_ag_date=
+        ifelse(
+          index==94 & covid19_ag_date=='31/06/2021' & setting=='IGD'
+          ,'01/07/2021'
+          ,covid19_ag_date
+        )
+    ) %>%
+    mutate(
+      plain_xray_chest_date=
+        ifelse(
+          index==42
+          & plain_xray_chest_date=='16/12/2020 | 16/20/20'
+          & setting=='Poliklinik'
+          ,'16/12/2020 | 16/12/2020'
+          ,plain_xray_chest_date
+        )
+    ) %>%
+    mutate(
+      plain_xray_chest_desc=
+        ifelse(
+          index==42
+          & plain_xray_chest_desc==paste0(
+            'Pneumonia bilateral typical COVID 19 derajat sedang, cardiomegaly'
+            ,' | '
+            ,'Pneumonia bilateral tipikal COVID derajat sedang, Besar cor normal'
+          )
+          & setting=='Poliklinik'
+          ,paste0(
+            'Pneumonia bilateral typical COVID 19 derajat sedang'
+            ,' | '
+            ,'Pneumonia bilateral typical COVID 19 derajat sedang'
+          )
+          ,plain_xray_chest_desc
+        )
+    ) %>%
+    mutate_at('index',as.double) %>%
+    arrange(setting,index)
+}
+```
+
+```{r General and sporadic cleaning, include=FALSE}
+raw_data$source2=
+  raw_data$source %>%
+  genspo_cleaning(raw_data$meta$attribute$attribute)
+```
+
+```{r Manually check all possible values, eval=FALSE, include=FALSE}
+raw_data$source2 %>%
+  lapply(X=colnames(.),Y=.,function(X,Y){
+    Y %>%
+      group_by_at(X) %>%
+      summarize(n=n()) %>%
+      arrange_at(X)
+  })
+
+# setting: IGD, Poliklinik
+# index: numeric
+# mrn: text numeric, No data
+# admission_date: dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# sex: Laki-laki (3 variations), Perempuan (2 variations), No data
+# age: ... Thn ... bln ... hr, No data
+# fever: No data, Tidak (2 variations), Y, Ya, Ya (...)
+# cough: No data, Tidak (2 variations), Ya, Ya (...)
+# loss_smell: No data, Sulit dinilai, Tidak (3 variations), Ya, Ya (...)
+# loss_taste: No data, Sulit dinilai, Tidak, Ya, Ya (7/2)
+# fatigue: No data, Tidak (2 variations), ya, Ya, Ya (...)
+# skipped_meals: No data, Tidak, ya, Ya, Ya (...)
+# nasal_discharge: No data, Tidak, Ya, Ya (2 minggu yll), Ys
+# sore_throat: No data, Tidak, Ya, Ya (sejak 3 hari SMRS)
+# sore_muscles: No data, Tidak, Ya, Ya (gastrocnemius)
+# headache: No data, Tidak (2 variations), Ya, Ya (7/2)
+# dizziness: No data, Tidak, Ya, Ya (sejak 3 hari SMRS)
+# others: -, ...
+# contact_history: No data (2 variations), ...
+# travel_history: No data, ...
+# ct_scan_chest_desc: No data (2 variations), ...
+# ct_scan_chest_date: No data, dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# plain_xray_chest_desc: -, No data (2 variations), ...
+# plain_xray_chest_date: -, No data, dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# covid19_pcr_result: No data, Negatif, Positif, Positif (PKM Jetis),
+#                     Negatif (Rujukan dari rs adinda dg swab pcr +)+,
+#                     Positif (di Pramitha)	
+# covid19_pcr_date: No data (2 variations), dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# covid19_ag_result: No data (2 variations), Negatif (3 variations), Positif,
+#                    Positif (di pkm jetis di rm hanya tulisan swab, 
+#                    tidak tau pcr atau bukan)
+# covid19_ag_date: No data (2 variations), dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# covid19_ab_result: No data (2 variations), ...
+# covid19_ab_date: -, No data (3 variations), dd/mm/yyyy, dd/mm/yy, d/m/yyyy
+# comorbidity: -, No data, ...
+# mri_chest_desc: No data (4 variations), ...
+# mri_chest_date: -, No data, 10/10/2020, 26/01/2021
+# vaccination: No data, Belum, Belum vaksin (2 variations), 
+#              Tidak terdaftar (3 variations), 
+#              Sudah vaksin (2 variations) ...
+# note: No data, Pasien meninggal ...
+```
+
+```{r Get subject with multi entries, include=FALSE}
+raw_data$multientry=
+  raw_data$source2 %>%
+  gather(attribute,value,-setting,-index) %>%
+  filter(str_detect(value,'\\|')) %>%
+  mutate(n=1+str_count(value,'\\|')) %>%
+  group_by(setting,index) %>%
+  mutate(p=attribute %>% .[!duplicated(.)] %>% length()) %>%
+  ungroup() %>%
+  select(n,p,everything()) %>%
+  arrange(
+    desc(n)
+    ,desc(p)
+    ,setting
+    ,index
+    ,factor(
+      attribute
+      ,raw_data$source2 %>%
+        colnames() %>%
+        .[!.%in%c('setting','index')]
+    )
+  )
+```
+
+```{r Assess the multi-entry subjects, eval=FALSE, include=FALSE}
+raw_data$multientry
+
+raw_data$multientry %>%
+  select(attribute) %>%
+  filter(!duplicated(.)) %>%
+  arrange(
+    factor(
+      attribute
+      ,raw_data$source2 %>%
+        colnames() %>%
+        .[!.%in%c('setting','index')]
+    )
+  )
+```
+
+```{r Function to split columns with uni- and multi entries, include=FALSE}
+split_entry=function(data){
+  output=list()
+  output$unientry=
+    data %>%
+    select_at(
+      colnames(.) %>%
+        .[!str_detect(.,'_result|_desc|_date')|.=='admission_date']
+    )
+  
+  output$multientry=
+    data %>%
+    gather(attribute,value,-setting,-index,-mrn,-admission_date) %>%
+    filter(str_detect(attribute,'_result|_desc|_date')) %>%
+    mutate(
+      attribute=
+        str_replace_all(
+          attribute
+          ,'_result'
+          ,'_desc'
+        )
+    ) %>%
+    mutate(
+      attribute=
+        str_replace_all(
+          attribute
+          ,'_desc'
+          ,'|desc'
+        )
+    ) %>%
+    mutate(
+      attribute=
+        str_replace_all(
+          attribute
+          ,'_date'
+          ,'|date'
+        )
+    ) %>%
+    separate(attribute,c('attribute','attribute2'),sep='\\|') %>%
+    spread(attribute2,value) %>%
+    lapply(X=seq(nrow(.)),Y=.,function(X,Y){
+      Y[X,] %>%
+        select(-desc,-date) %>%
+        cbind(
+          Y$desc[X] %>%
+            str_split(' \\| ') %>%
+            .[[1]] %>%
+            data.frame(desc=.)
+        ) %>%
+        cbind(
+          Y$date[X] %>%
+            str_split(' \\| ') %>%
+            .[[1]] %>%
+            data.frame(date=.)
+        )
+    }) %>%
+    do.call(rbind,.) %>%
+    filter(!(str_detect(str_to_lower(desc),'no data')|desc=='-')) %>%
+    arrange(
+      setting
+      ,index
+      ,factor(
+        attribute
+        ,raw_data$source2 %>%
+          colnames() %>%
+          .[!.%in%c('setting','index')] %>%
+          str_remove_all('_result|_desc|_date') %>%
+          .[!duplicated(.)]
+      )
+    )
+  
+  output
+}
+```
+
+```{r Split columns with uni- and multi entries, include=FALSE}
+raw_data$source3=
+  raw_data$source2 %>%
+  split_entry()
+```
+
+```{r Assess the multi-entry columns, eval=FALSE, include=FALSE}
+raw_data$source3$multientry %>%
+  select(attribute) %>%
+  filter(!duplicated(.)) %>%
+  arrange(
+    factor(
+      attribute
+      ,raw_data$source2 %>%
+        colnames() %>%
+        .[!.%in%c('setting','index')] %>%
+        str_remove_all('_result|_desc|_date') %>%
+        .[!duplicated(.)]
+    )
+  )
+```
+
+```{r Function to Join the multi- to the uni-entry columns, include=FALSE}
+join_entry=function(data){
+  data$unientry %>%
+    left_join(
+      data$multientry
+      ,by=c('setting','index','mrn','admission_date')
+    ) %>%
+    rename(test=attribute)
+}
+```
+
+```{r Join the multi- to the uni-entry columns, include=FALSE}
+raw_data$source4=
+  raw_data$source3 %>%
+  join_entry()
+```
+
+```{r Function to re-format date and compute test days from admission, include=FALSE}
+redate_compute=function(data){
+  data %>%
+    mutate_at(
+      c('admission_date','date')
+      ,function(x){
+        ifelse(
+          str_detect(str_to_lower(x),'no data')|x=='-'
+          ,NA
+          ,x
+        )
+      }
+    ) %>%
+    mutate_at(
+      c('admission_date','date')
+      ,function(x){
+        sapply(
+          x
+          ,function(x){
+            ifelse(
+              is.na(x)
+              ,x
+              ,paste(
+                ifelse(
+                  str_count(str_split(x,'/')[[1]][3])==2
+                  ,paste0(20,str_split(x,'/')[[1]][3])
+                  ,str_split(x,'/')[[1]][3]
+                )
+                ,str_pad(str_split(x,'/')[[1]][2],2,'left','0')
+                ,str_pad(str_split(x,'/')[[1]][1],2,'left','0')
+                ,sep='/'
+              )
+            )
+          }
+        )
+      }
+    ) %>%
+    mutate_at(
+      c('admission_date','date')
+      ,as_date
+    ) %>%
+    mutate(
+      from_admission=as.duration(date-admission_date)/ddays(1)
+    )
+}
+```
+
+```{r Re-format date and compute test days from admission, include=FALSE}
+raw_data$source5=
+  raw_data$source4 %>%
+  redate_compute()
+```
+
+```{r Save table of diagnostic tests of referral center, eval=FALSE, include=FALSE}
+raw_data$source5 %>%
+  filter(setting=='Poliklinik') %>%
+  select(index,test,desc,admission_date,date,from_admission) %>%
+  filter(!between(from_admission,-14,14)) %>%
+  arrange(index)
+# %>%
+#   write_csv('data/form_penelitian_covid19_202105271630_gmt8_rev2.csv')
+```
+
+```{r Revise data from referral center, include=FALSE}
+raw_data$source6$referral_center=
+  rbind(
+    raw_data$source5 %>%
+      filter(setting=='Poliklinik') %>%
+      filter(
+        !index%in%
+        (read_csv(
+              'data/form_penelitian_covid19_202105271630_gmt8_rev2.csv'
+           ) %>%
+           pull(index))
+      )
+    
+    ,raw_data$source5 %>%
+      filter(setting=='Poliklinik') %>%
+      filter(
+        index%in%
+        (read_csv(
+              'data/form_penelitian_covid19_202105271630_gmt8_rev2.csv'
+           ) %>%
+           pull(index))
+      ) %>%
+      select(setting,index,mrn,test) %>%
+      left_join(
+        # After checking, index 42 of referral center got a PCR on 2020-12-13
+        read_csv(
+            'data/form_penelitian_covid19_202105271630_gmt8_rev2_checked.csv'
+          ) %>%
+          mutate(Tempat='Poliklinik') %>%
+          genspo_cleaning(raw_data$meta$attribute$attribute) %>%
+          filter(
+            index%in%
+            (read_csv(
+                  'data/form_penelitian_covid19_202105271630_gmt8_rev2.csv'
+               ) %>%
+               pull(index))
+          ) %>%
+          split_entry() %>%
+          join_entry() %>%
+          redate_compute() %>%
+          filter(!duplicated(.))
+        ,by=c('setting','index','mrn','test')
+      ) %>%
+      .[,colnames(raw_data$source5)]
+  ) %>%
+  arrange(index)
+```
+
+```{r Save table of diagnostic tests of emergency department, eval=FALSE, include=FALSE}
+raw_data$source5 %>%
+  filter(setting=='IGD') %>%
+  select(index,test,desc,admission_date,date,from_admission) %>%
+  filter(!between(from_admission,-14,14)) %>%
+  arrange(index)
+# %>%
+#   write_csv('data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd_rev2.csv')
+```
+
+```{r Revise data from emergency department, include=FALSE}
+raw_data$source6$emergency_department=
+  raw_data$source5 %>%
+  filter(setting=='IGD')
+```
+
+```{r Rejoin data from both settings, include=FALSE}
+raw_data$source7=
+  rbind(
+    raw_data$source6$referral_center
+    ,raw_data$source6$emergency_department
+  )
+```
+
+```{r Check input of test date by low or high values, eval=FALSE, include=FALSE}
+raw_data$source7 %>%
+  pull(from_admission) %>%
+  lapply(X=1:3,Y=.,function(X,Y){
+    if(X==1){
+      quantile(Y,seq(0,1,0.05),na.rm=T)
+    }else if(X==2){
+      quantile(Y,seq(0,0.1,0.01),na.rm=T)
+    }else{
+      quantile(Y,seq(0.9,1,0.01),na.rm=T)
+    }
+  }) %>%
+  setNames(c('all deciles','lowest deciles','highest deciles'))
+```
+
+```{r Determine outcome, include=FALSE}
+raw_data$source8=
+  raw_data$source7 %>%
+  group_by(setting,index) %>%
+  summarize(
+    admission_date=min(admission_date)
+    ,outcome=
+      ifelse(
+        sum(test=='covid19_pcr'&abs(from_admission)<=14)==0
+        ,NA
+        ,ifelse(
+          sum(test=='covid19_pcr' & str_to_lower(desc)=='positif')>0
+          ,1
+          ,0
+        )
+      )
+  ) %>%
+  ungroup()
+```
+
+```{r Check sample size by outcome, eval=FALSE, include=FALSE}
+raw_data$source8 %>%
+  group_by(setting,outcome) %>%
+  summarize(n=n())
+```
+
+```{r Check distribution of samples by admission date, eval=FALSE, include=FALSE}
+raw_data$source8 %>%
+  group_by(setting,admission_date) %>%
+  summarize(n=n()) %>%
+  ggplot(aes(admission_date,n)) +
+  geom_col() +
+  facet_wrap(~setting,ncol=1) +
+  scale_x_date(date_breaks='month') +
+  theme(axis.text.x=element_text(angle=90))
+```
+
+```{r Follow up no-PCR patients of emergency department, eval=FALSE, include=FALSE}
+raw_data$source8 %>%
+  filter(setting=='IGD' & is.na(outcome)) %>%
+  left_join(
+    raw_data$source5 %>%
+      select(setting,index,mrn,admission_date,vaccination,note) %>%
+      filter(!duplicated(.))
+    ,by=c('setting','index','admission_date')
+  )
+
+# Send to collaborators to follow-up
+# %>%
+#   write_csv('data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd_no_pcr.csv')
+```
+
+```{r Update data after follow-up}
+raw_data$source9$referral_center=
+  raw_data$source8 %>%
+  left_join(raw_data$source7,by=c('setting','index','admission_date')) %>%
+  filter(setting=='Poliklinik')
+
+raw_data$source9$emergency_department_pcr=
+  raw_data$source8 %>%
+  left_join(raw_data$source7,by=c('setting','index','admission_date')) %>%
+  filter(setting=='IGD' & !is.na(outcome))
+
+raw_data$source9$emergency_department_no_pcr=
+  raw_data$source8 %>%
+  left_join(raw_data$source7,by=c('setting','index','admission_date')) %>%
+  filter(setting=='IGD' & is.na(outcome)) %>%
+  select(-test,-desc,-date,-from_admission) %>%
+  filter(!duplicated(.)) %>%
+  left_join(
+    read_csv(
+        paste0(
+          'data/form_penelitian_covid19_202108191153_gmt8_mar_jul_igd_no_pcr.csv'
+          ,'_to_202109301323_pcr.csv'
+        )
+      ) %>%
+      rename_all(str_to_lower) %>%
+      rename_all(str_replace_all,'\\s+','_') %>%
+      rename(var1=tgl_pcr,var2=hasil) %>%
+      left_join(
+        select(.,var1,var2) %>%
+          unite(var,var1,var2,sep=' | ',remove=F) %>%
+          filter(!duplicated(.)) %>%
+          mutate_at('var',str_to_lower) %>%
+          mutate(
+            test=
+              case_when(
+                str_detect(var,'belum')~'NA'
+                ,str_detect(var,'pcr|ct value')~'covid19_pcr'
+                ,str_detect(var,'antigen')~'covid19_ag'
+                ,str_detect(var,'igg|igm')~'covid19_ab'
+                ,TRUE~'NA'
+              )
+          ) %>%
+          mutate(
+            desc=
+              case_when(
+                test=='NA'~'NA'
+                ,test=='covid19_ab' & str_detect(var,'positif')~'Reaktif'
+                ,test=='covid19_ab' & str_detect(var,'negatif')~'Non Reaktif'
+                ,str_detect(var,'positif|ct value|gen orf')~'Positif'
+                ,str_detect(var,'negatif')~'Negatif'
+                ,TRUE~'NA'
+              )
+          ) %>%
+          mutate(
+            date=
+              var %>%
+              sapply(function(x)str_split_fixed(x,'\\s+',2)[,1])
+            ,date=
+              ifelse(
+                test=='NA'|!str_detect(date,'[:digit:]')
+                ,'NA'
+                ,date
+              )
+            ,date=
+              case_when(
+                date=='29'~'2021/07/29 | 2021/07/30'
+                ,date=='6-7'~'2021/07/06 | 2021/07/07'
+                ,date=='26/03/2'~'26/03/21'
+                ,date=='23/07/2021'~'2021/07/23'
+                ,TRUE~date
+              )
+            ,date=
+              ifelse(
+                str_detect(date,'/21')
+                ,sapply(date,function(x){
+                  str_split_fixed(x,'/',3)[,2:1] %>%
+                    paste0(collapse='/') %>%
+                    c('2021') %>%
+                    rev() %>%
+                    paste0(collapse='/')
+                })
+                ,date
+              )
+          ) %>%
+          lapply(X=1,Y=.,function(X,Y){
+            filter(Y,str_detect(date,'\\|')) %>%
+              separate(date,c('date1','date2'),sep=' \\| ') %>%
+              gather(key,date,-var,-var1,-var2,-test,-desc) %>%
+              select(var,var1,var2,test,desc,date) %>%
+              rbind(filter(Y,!str_detect(date,'\\|')))
+          }) %>%
+          .[[1]] %>%
+          mutate(
+            date=
+              date %>%
+              sapply(function(x){
+                if(x=='NA'){
+                  'NA'
+                }else{
+                  y=str_split_fixed(x,'/',3) %>%
+                    as.numeric()
+                  paste0(
+                    y[1]
+                    ,'/'
+                    ,str_pad(y[2],2,'left','0')
+                    ,'/'
+                    ,str_pad(y[3],2,'left','0')
+                  )
+                }
+              })
+          ) %>%
+          mutate_all(function(x)ifelse(x=='NA',NA,x)) %>%
+          mutate_at('date',as_date) %>%
+          filter(!is.na(test))
+        ,by=c('var1','var2')
+      ) %>%
+      mutate(
+        admission_date=as_date(admission_date)
+      ) %>%
+      mutate(
+        from_admission=as.duration(date-admission_date)/ddays(1)
+      ) %>%
+      select(-var,-var1,-var2,-no_rm)
+    ,by=c('setting','index','admission_date','outcome','vaccination','note')
+  )
+```
+
+```{r Determine outcome by the definition}
+raw_data$source10$pcr=
+  raw_data$source9 %>%
+  do.call(rbind,.) %>%
+  group_by(setting,index) %>%
+  summarize(
+    admission_date=min(admission_date)
+    ,outcome=
+      ifelse(
+        sum(test=='covid19_pcr'&abs(from_admission)<=14)==0
+        ,NA
+        ,ifelse(
+          sum(test=='covid19_pcr' & str_to_lower(desc)=='positif')>0
+          ,1
+          ,0
+        )
+      )
+  ) %>%
+  ungroup() %>%
+  select(setting,index,admission_date,outcome) %>%
+  mutate(test='outcome')
+
+raw_data$source10$ag=
+  raw_data$source9 %>%
+  do.call(rbind,.) %>%
+  group_by(setting,index) %>%
+  summarize(
+    admission_date=min(admission_date)
+    ,outcome=
+      ifelse(
+        sum(test=='covid19_ag'&abs(from_admission)<=14)==0
+        ,NA
+        ,ifelse(
+          sum(test=='covid19_ag' & str_to_lower(desc)=='positif')>0
+          ,1
+          ,0
+        )
+      )
+  ) %>%
+  ungroup() %>%
+  select(setting,index,admission_date,outcome) %>%
+  mutate(test='ag')
+
+raw_data$source10$ab=
+  raw_data$source9 %>%
+  do.call(rbind,.) %>%
+  group_by(setting,index) %>%
+  summarize(
+    admission_date=min(admission_date)
+    ,outcome=
+      ifelse(
+        sum(test=='covid19_ab'&abs(from_admission)<=14)==0
+        ,NA
+        ,ifelse(
+          sum(test=='covid19_ab' & str_to_lower(desc)=='reaktif')>0
+          ,1
+          ,0
+        )
+      )
+  ) %>%
+  ungroup() %>%
+  select(setting,index,admission_date,outcome) %>%
+  mutate(test='ab')
+```
+
+```{r Combine outcome data}
+raw_data$source11=
+  raw_data$source10 %>%
+  do.call(rbind,.) %>%
+  spread(test,outcome)
+```
+
+```{r Show all possible combinations of outcome availability}
+raw_data$source11 %>%
+  group_by(setting,ab,ag,outcome) %>%
+  summarize(n=n())
+```
+
+```{r List variable names of predictors}
+predictors=
+  c('age'
+    ,'sex'
+    ,'loss_smell'
+    ,'loss_taste'
+    ,'cough'
+    ,'fatigue'
+    ,'skipped_meals')
+```
+
+```{r Function to predict using the scoring rules}
+index_test=function(data){
+  data %>%
+    mutate(
+      odd=
+        -1.32
+        -(0.01*age)
+        +(0.44*sex)
+        +(1.75*loss_smell_taste)
+        +(0.31*cough)
+        +(0.49*fatigue)
+        +(0.39*skipped_meals)
+    ) %>%
+    mutate(prob=exp(odd)/(1+exp(odd))) %>%
+    pull(prob)
+}
+```
+
+```{r Compute evaluation metrics}
+eval_metrics_boot=
+  seq(30) %>%
+  pblapply(function(x){
+    suppressWarnings(set.seed(2021-12-5+x,sample.kind='Rounding'))
+    raw_data$source11 %>%
+      mutate(pred_null=1) %>%
+      left_join(
+        raw_data$source7 %>%
+          select_at(c(
+            'setting'
+            ,'index'
+            ,'admission_date'
+            ,predictors
+          )) %>%
+          filter(!duplicated(.))
+        ,by=c('setting','index','admission_date')
+      ) %>%
+      
+      lapply(X=unique(pull(.,setting)),Y=.,function(X,Y){
+        Y %>%
+          filter(setting==X) %>%
+          .[sample(seq(nrow(.)),nrow(.),T),] %>%
+          group_by(index) %>%
+          mutate(index2=seq(n())) %>%
+          ungroup() %>%
+          unite(index,index,index2,sep='.')
+      }) %>%
+      do.call(rbind,.) %>%
+      
+      mutate_at(predictors,function(x){
+        y=x %>%
+          trimws() %>%
+          str_replace_all('\\s+',' ') %>%
+          str_to_lower()
+        ifelse(str_detect(y,'no data'),NA,y)
+      }) %>%
+      
+      mutate(
+        age=str_remove_all(age,'[:alpha:]|\n')
+        ,age=ifelse(str_detect(age,'[:digit:]'),age,NA)
+      ) %>%
+      separate(age,c('y','m','d','u'),sep='\\s+') %>%
+      select(-u) %>%
+      mutate_at(c('y','m','d'),as.integer) %>%
+      mutate(age=y+m/12+d/365) %>%
+      select(setting,index,admission_date,outcome,pred_null,age,everything()) %>%
+      select(-y,-m,-d) %>%
+      
+      mutate(
+        sex=
+          ifelse(
+            is.na(sex)
+            ,NA
+            ,as.integer(str_detect(sex,'laki'))
+          )
+      ) %>%
+      
+      mutate_at(predictors[-1:-2],function(x){
+        ifelse(
+          is.na(x)
+          ,NA
+          ,as.integer(str_detect(x,'ya'))
+        )
+      }) %>%
+      
+      mutate(loss_smell_taste=as.integer((loss_smell+loss_taste)>0)) %>%
+      select(-loss_smell,-loss_taste) %>%
+      select(
+        setting,index,admission_date,outcome
+        ,pred_null,ag,ab
+        ,age,sex,loss_smell_taste
+        ,everything()
+      ) %>%
+      
+      mutate(
+        pred=as.integer(index_test(.)>0.5)
+        ,pred2=as.integer(index_test(.)>0.5 | ag==1)
+        ,pred3=as.integer(index_test(.)>0.5 & ag==1)
+      ) %>%
+      
+      select(setting,outcome,pred_null,ag,ab,pred,pred2,pred3) %>%
+      gather(test,pred,-setting,-outcome) %>%
+      group_by(setting,test,outcome,pred) %>%
+      summarize(n=n()) %>%
+      ungroup() %>%
+      unite(metric,outcome,pred,sep='_') %>%
+      mutate(
+        metric=
+          case_when(
+            metric=='1_1'~'TP'
+            ,metric=='1_0'~'FN'
+            ,metric=='1_NA'~'ZPU'
+            ,metric=='0_1'~'FP'
+            ,metric=='0_0'~'TN'
+            ,metric=='0_NA'~'ZNU'
+            ,metric=='NA_1'~'UP'
+            ,metric=='NA_0'~'UN'
+            ,metric=='NA_NA'~'UU'
+          )
+      ) %>%
+      spread(metric,n) %>%
+      mutate(
+        sensitivity=TP/(FN+TP)
+        ,specificity=TN/(FP+TN)
+        ,ppv=TP/(TP+FP)
+        ,npv=TN/(TN+FN)
+        ,nb=(TP-FP*0.5/((1-0.5)+1e-17))/(TP+FP+FN+TN)
+      ) %>%
+      filter(!(setting=='IGD' & test=='pred_null')) %>%
+      mutate(b=x) %>%
+      select(
+        b
+        ,setting,test
+        ,TP,FN,FP,TN
+        ,sensitivity,specificity,ppv,npv,nb
+        ,everything()
+      )
+  }) %>%
+  do.call(rbind,.)
+
+eval_metrics=
+  eval_metrics_boot %>%
+  select(b,setting,test,sensitivity,specificity,ppv,npv,nb) %>%
+  gather(metric,value,-b,-setting,-test) %>%
+  filter(!is.na(value)) %>%
+  group_by(setting,test,metric) %>%
+  summarize(
+    avg=mean(value)
+    ,lb=mean(value)-qnorm(0.975)*sd(value)/sqrt(n())
+    ,ub=mean(value)+qnorm(0.975)*sd(value)/sqrt(n())
+    ,n=n()
+  )
+
+eval_metrics_formatted=
+  eval_metrics %>%
+  mutate_at(c('avg','lb','ub'),function(x)round(x,2)) %>%
+  mutate(
+    lb=paste0('(',lb)
+    ,ub=paste0(ub,')')
+  ) %>%
+  unite(range,lb,ub,sep=' to ') %>%
+  unite(value,avg,range,sep=' ') %>%
+  select(-n)
+```
+
+```{r Wrap up preprocessed data}
+preproc_data=
+  raw_data$source11 %>%
+  mutate(pred_null=1) %>%
+  left_join(
+    raw_data$source7 %>%
+      select_at(c(
+        'setting'
+        ,'index'
+        ,'admission_date'
+        ,predictors
+      )) %>%
+      filter(!duplicated(.))
+    ,by=c('setting','index','admission_date')
+  ) %>%
+  
+  mutate_at(predictors,function(x){
+    y=x %>%
+      trimws() %>%
+      str_replace_all('\\s+',' ') %>%
+      str_to_lower()
+    ifelse(str_detect(y,'no data'),NA,y)
+  }) %>%
+  
+  mutate(
+    age=str_remove_all(age,'[:alpha:]|\n')
+    ,age=ifelse(str_detect(age,'[:digit:]'),age,NA)
+  ) %>%
+  separate(age,c('y','m','d','u'),sep='\\s+') %>%
+  select(-u) %>%
+  mutate_at(c('y','m','d'),as.integer) %>%
+  mutate(age=y+m/12+d/365) %>%
+  select(setting,index,admission_date,outcome,pred_null,age,everything()) %>%
+  select(-y,-m,-d) %>%
+  
+  mutate(
+    sex=
+      ifelse(
+        is.na(sex)
+        ,NA
+        ,as.integer(str_detect(sex,'laki'))
+      )
+  ) %>%
+  
+  mutate_at(predictors[-1:-2],function(x){
+    ifelse(
+      is.na(x)
+      ,NA
+      ,as.integer(str_detect(x,'ya'))
+    )
+  }) %>%
+  
+  mutate(loss_smell_taste=as.integer((loss_smell+loss_taste)>0)) %>%
+  select(-loss_smell,-loss_taste) %>%
+  select(
+    setting,index,admission_date,outcome
+    ,pred_null,ag,ab
+    ,age,sex,loss_smell_taste
+    ,everything()
+  ) %>%
+  
+  mutate(pred=index_test(.))
+```
+
+```{r figure-1, fig.height=4.617475, fig.width=7.48031}
+preproc_data %>%
+  group_by(setting,admission_date) %>%
+  summarize(n=n()) %>%
+  mutate(
+    setting=
+      case_when(
+        setting=='IGD'~'Emergency department'
+        ,setting=='Poliklinik'~'Referral center'
+        ,TRUE~''
+      )
+  ) %>%
+  ggplot(aes(admission_date,n)) +
+  geom_col() +
+  geom_smooth(method='loess',formula=y~x,span=1/30*7,color='black') +
+  facet_wrap(~setting,ncol=1) +
+  scale_x_date(date_breaks='month') +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  xlab('Date') +
+  scale_y_continuous('Count',limits=c(0,15)) +
+  theme(
+    text=element_text(size=10)
+    ,strip.background=element_rect(fill='black')
+    ,strip.text=element_text(color='white')
+  )
+
+ggsave(
+  'figure1.eps'
+  ,width=7.48031
+  ,height=7.48031/7.29*4.5
+  ,units='in'
+)
+```
+
+```{r Identify start and end of data collection}
+preproc_data %>%
+  group_by(setting,admission_date) %>%
+  summarize(n=n()) %>%
+  mutate(
+    setting=
+      case_when(
+        setting=='IGD'~'Emergency department'
+        ,setting=='Poliklinik'~'Referral center'
+        ,TRUE~''
+      )
+  ) %>%
+  group_by(setting) %>%
+  summarize(
+    start=min(admission_date,na.rm=T)
+    ,end=max(admission_date,na.rm=T)
+  )
+```
+
+```{r Describe processed data for publication, include=FALSE}
+proc_data=
+  raw_data$source11 %>%
+  mutate(pred_null=ifelse(setting=='IGD',NA,1)) %>%
+  left_join(
+    raw_data$source7 %>%
+      select_at(c(
+        'setting'
+        ,'index'
+        ,'admission_date'
+        ,predictors
+      )) %>%
+      filter(!duplicated(.))
+    ,by=c('setting','index','admission_date')
+  ) %>%
+  
+  mutate_at(predictors,function(x){
+    y=x %>%
+      trimws() %>%
+      str_replace_all('\\s+',' ') %>%
+      str_to_lower()
+    ifelse(str_detect(y,'no data'),NA,y)
+  }) %>%
+  
+  mutate(
+    age=str_remove_all(age,'[:alpha:]|\n')
+    ,age=ifelse(str_detect(age,'[:digit:]'),age,NA)
+  ) %>%
+  separate(age,c('y','m','d','u'),sep='\\s+') %>%
+  select(-u) %>%
+  mutate_at(c('y','m','d'),as.integer) %>%
+  mutate(age=y+m/12+d/365) %>%
+  select(setting,index,admission_date,outcome,pred_null,age,everything()) %>%
+  select(-y,-m,-d) %>%
+  
+  mutate(
+    sex=
+      ifelse(
+        is.na(sex)
+        ,NA
+        ,as.integer(str_detect(sex,'laki'))
+      )
+  ) %>%
+  
+  mutate_at(predictors[-1:-2],function(x){
+    ifelse(
+      is.na(x)
+      ,NA
+      ,as.integer(str_detect(x,'ya'))
+    )
+  }) %>%
+  
+  mutate(loss_smell_taste=as.integer((loss_smell+loss_taste)>0)) %>%
+  select(
+    setting,index,admission_date,outcome
+    ,pred_null,ag,ab
+    ,age,sex,loss_smell_taste
+    ,everything()
+  ) %>%
+  
+  mutate(pred=as.integer(index_test(.)>0.5))
+```
+
+```{r table-1, eval=FALSE, include=FALSE}
+# Show number and percentage of each variable
+proc_data  %>%
+  
+  gather(variable,value,-setting,-index,-admission_date) %>%
+  
+  lapply(X=.$variable %>% .[!duplicated(.)],Y=.,function(X,Y){
+    if(X=='age'){
+      Y %>%
+        filter(variable==X) %>%
+        group_by(setting) %>%
+        summarize(
+          avg=mean(value,na.rm=T)
+          ,se=qnorm(0.975)*sd(value,na.rm=T)/sqrt(n())
+          ,n=n()
+          ,na=sum(is.na(value))
+        ) %>%
+        gather(metric,value,-setting) %>%
+        mutate(scale='num') %>%
+        select(setting,metric,value,scale) %>%
+        mutate(metric=paste0(X,'|',metric)) %>%
+        arrange(setting,metric) %>%
+        ungroup() %>%
+        group_by(setting) %>%
+        mutate(
+          total=
+            sum(
+              ifelse(
+                str_sub(metric,str_count(metric),str_count(metric))=='n'
+                ,value
+                ,NA
+              )
+              ,na.rm=T
+            )
+          ,p=
+            ifelse(
+              str_detect(metric,'\\|n')
+              ,value/total
+              ,NA
+            )
+        ) %>%
+        ungroup()
+    }else{
+      Y %>%
+        filter(variable==X) %>%
+        group_by(setting,value) %>%
+        summarize(n=n()) %>%
+        mutate(scale='cat') %>%
+        select(setting,value,n,scale) %>%
+        mutate(value=paste0(X,'|',value)) %>%
+        setNames(c('setting','metric','value','scale')) %>%
+        arrange(setting,metric) %>%
+        ungroup() %>%
+        group_by(setting) %>%
+        mutate(
+          total=sum(value)
+          ,p=value/total
+        ) %>%
+        ungroup()
+    }
+  })
+
+# Show stats for p-value of non-missing in Table 1
+proc_data %>%
+  gather(variable,value,-setting,-index,-admission_date) %>%
+  filter(!is.na(value)) %>%
+  mutate(setting=factor(setting,c('IGD','Poliklinik'))) %>%
+  group_by(variable) %>%
+  do(tidy(glm(setting~value,data=.,family=binomial(link='logit')))) %>%
+  filter(term!='(Intercept)') %>%
+  select(-term) %>%
+  ungroup() %>%
+  mutate(
+    p_value=
+      ifelse(
+        p.value<0.001
+        ,'<0.001'
+        ,ifelse(
+          p.value>0.05
+          ,'>0.05'
+          ,round(p.value,3)
+        )
+      )
+    ,OR=round(exp(estimate),3)
+    ,LB=round(exp(estimate-std.error),3)
+    ,UB=round(exp(estimate+std.error),3)
+  )
+
+# Show stats for p-value of missing in Table 1}
+proc_data %>%
+  gather(variable,value,-setting,-index,-admission_date) %>%
+  mutate(value=as.integer(is.na(value))) %>%
+  mutate(setting=factor(setting,c('IGD','Poliklinik'))) %>%
+  group_by(variable) %>%
+  do(tidy(glm(setting~value,data=.,family=binomial(link='logit')))) %>%
+  filter(term!='(Intercept)') %>%
+  select(-term) %>%
+  ungroup() %>%
+  mutate(
+    p_value=
+      ifelse(
+        p.value<0.001
+        ,'<0.001'
+        ,ifelse(
+          p.value>0.05
+          ,'>0.05'
+          ,round(p.value,3)
+        )
+      )
+    ,OR=round(exp(estimate),3)
+    ,LB=round(exp(estimate-std.error),3)
+    ,UB=round(exp(estimate+std.error),3)
+  )
+```
+
+```{r table-2}
+eval_metrics_formatted
+```
+
+```{r Visualize Table 2 for interpretation, fig.height=7, fig.width=7}
+eval_metrics %>%
+  ggplot(aes(test)) +
+  geom_linerange(aes(ymin=lb,ymax=ub)) +
+  geom_point(aes(y=avg)) +
+  geom_label(
+    data=
+      eval_metrics_formatted %>%
+      left_join(eval_metrics,by=c('setting','test','metric'))
+    ,aes(y=ub,label=value)
+    ,size=2.5,hjust=-0.1,vjust=0.5,label.padding=unit(0.1,'line')
+  ) +
+  facet_grid(metric~setting) +
+  coord_flip() +
+  scale_y_continuous(limits=c(0,1.5),breaks=seq(0,1,0.2))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
