@@ -1,13 +1,14 @@
 # Symptom-based prediction by machine learning to reduce hospital workload during COVID-19 surge: A validation study
 
-Amelia Nur Vidyanti1,2\*, Sekar Satiti1,2, Desin Pambudi Sejahtera1,2, Aditya 
+Amelia Nur Vidyanti1,2\*, Sekar Satiti1,2, Atitya Fithri Khairani1,2, Aditya 
 Rifqi Fauzi1, Muhammad Hardhantyo3,4, Herdiantri Sufriyana5,6, Emily Chia-Yu 
 Su5,7,8
 
 1 Department of Neurology, Faculty of Medicine, Public Health and Nursing, 
 Universitas Gadjah Mada, Yogyakarta 55281, Indonesia
 
-2… 
+2 Department of Neurology, Dr. Sardjito General Hospital, Yogyakarta 55281, 
+Indonesia
 
 3 Center for Health Policy and Management, Faculty of Medicine, Universitas 
 Gadjah Mada, Yogyakarta 55281, Indonesia
